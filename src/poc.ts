@@ -388,12 +388,45 @@ function saveHistory(history: string[]): void {
 
 const history = loadHistory();
 
+let lastResults: BrowseItem[] = [];
+let lastSuggestions: string[] = [];
+
+const COMMANDS = ['zones', 'zone', 'search', 'play', 'queue', 'pause', 'stop', 'next', 'now', 'ask', 'suggest', 'help', 'exit'];
+const ALIASES: Record<string, string[]> = {
+  s: ['search'], p: ['play'], q: ['queue'], a: ['ask']
+};
+
+function completer(line: string): [string[], string] {
+  const words = line.split(' ');
+  const cmd = words[0].toLowerCase();
+
+  if (words.length === 1) {
+    // Complete command names
+    const hits = [...COMMANDS, ...Object.keys(ALIASES)].filter(c => c.startsWith(cmd));
+    return [hits.length ? hits : COMMANDS, cmd];
+  }
+
+  // For play/queue, suggest available numbers
+  if (['play', 'p', 'queue', 'q'].includes(cmd)) {
+    const count = lastSuggestions.length || lastResults.length;
+    if (count > 0) {
+      const nums = Array.from({ length: count }, (_, i) => String(i + 1));
+      const partial = words[words.length - 1];
+      const hits = nums.filter(n => n.startsWith(partial));
+      return [hits, partial];
+    }
+  }
+
+  return [[], line];
+}
+
 const rl = readline.createInterface({
   input: process.stdin,
   output: process.stdout,
   history,
   historySize: MAX_HISTORY,
   removeHistoryDuplicates: true,
+  completer,
 });
 
 // Handle Ctrl-D (EOF)
@@ -418,9 +451,6 @@ function prompt(question: string): Promise<string> {
     });
   });
 }
-
-let lastResults: BrowseItem[] = [];
-let lastSuggestions: string[] = [];
 
 /**
  * Parse LLM output for track suggestions from JSON block.
@@ -502,7 +532,6 @@ async function handleCommand(input: string): Promise<void> {
           if (results.length && results[0].item_key) {
             console.log(`Playing: ${results[0].title}${results[0].subtitle ? ` - ${results[0].subtitle}` : ''}`);
             await playItem(results[0].item_key);
-            lastResults = results; // Store for subsequent plays
           } else {
             console.log('Track not found in library');
           }
@@ -517,31 +546,33 @@ async function handleCommand(input: string): Promise<void> {
     case 'queue':
     case 'q':
       if (arg) {
-        const num = parseInt(arg, 10);
-        if (lastResults.length && num > 0 && num <= lastResults.length) {
-          // Queue from search results
-          const item = lastResults[num - 1];
-          if (item.item_key) {
-            console.log(`Queueing: ${item.title}`);
-            await queueItem(item.item_key);
-          }
-        } else if (lastSuggestions.length && num > 0 && num <= lastSuggestions.length) {
-          // Queue from LLM suggestions - search and queue first result
-          const suggestion = lastSuggestions[num - 1];
-          console.log(`Searching for: ${suggestion}...`);
-          const results = await searchTracks(suggestion);
-          if (results.length && results[0].item_key) {
-            console.log(`Queueing: ${results[0].title}${results[0].subtitle ? ` - ${results[0].subtitle}` : ''}`);
-            await queueItem(results[0].item_key);
-            lastResults = results;
+        // Support multiple numbers: q 2 3 4 5 or q 2,3,4,5
+        const nums = arg.split(/[\s,]+/).map(n => parseInt(n, 10)).filter(n => !isNaN(n));
+        for (const num of nums) {
+          if (lastResults.length && num > 0 && num <= lastResults.length) {
+            // Queue from search results
+            const item = lastResults[num - 1];
+            if (item.item_key) {
+              console.log(`Queueing: ${item.title}`);
+              await queueItem(item.item_key);
+            }
+          } else if (lastSuggestions.length && num > 0 && num <= lastSuggestions.length) {
+            // Queue from LLM suggestions - search and queue first result
+            const suggestion = lastSuggestions[num - 1];
+            console.log(`Searching for: ${suggestion}...`);
+            const results = await searchTracks(suggestion);
+            if (results.length && results[0].item_key) {
+              console.log(`Queueing: ${results[0].title}${results[0].subtitle ? ` - ${results[0].subtitle}` : ''}`);
+              await queueItem(results[0].item_key);
+            } else {
+              console.log(`Track not found: ${suggestion}`);
+            }
           } else {
-            console.log('Track not found in library');
+            console.log(`Invalid number: ${num}`);
           }
-        } else {
-          console.log('Invalid number. Use search or suggest first.');
         }
       } else {
-        console.log('Usage: queue <n>');
+        console.log('Usage: queue <n> [n2 n3 ...] or queue 2,3,4,5');
       }
       break;
 
